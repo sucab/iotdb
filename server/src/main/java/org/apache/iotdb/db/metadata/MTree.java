@@ -18,19 +18,53 @@
  */
 package org.apache.iotdb.db.metadata;
 
-import static java.util.stream.Collectors.toList;
-import static org.apache.iotdb.db.conf.IoTDBConstant.PATH_SEPARATOR;
-import static org.apache.iotdb.db.conf.IoTDBConstant.PATH_WILDCARD;
+import org.apache.iotdb.db.conf.IoTDBConfig;
+import org.apache.iotdb.db.conf.IoTDBConstant;
+import org.apache.iotdb.db.conf.IoTDBDescriptor;
+import org.apache.iotdb.db.engine.querycontext.QueryDataSource;
+import org.apache.iotdb.db.exception.metadata.AliasAlreadyExistException;
+import org.apache.iotdb.db.exception.metadata.IllegalParameterOfPathException;
+import org.apache.iotdb.db.exception.metadata.IllegalPathException;
+import org.apache.iotdb.db.exception.metadata.MetadataException;
+import org.apache.iotdb.db.exception.metadata.PathAlreadyExistException;
+import org.apache.iotdb.db.exception.metadata.PathNotExistException;
+import org.apache.iotdb.db.exception.metadata.StorageGroupAlreadySetException;
+import org.apache.iotdb.db.exception.metadata.StorageGroupNotSetException;
+import org.apache.iotdb.db.metadata.MManager.StorageGroupFilter;
+import org.apache.iotdb.db.metadata.logfile.MLogReader;
+import org.apache.iotdb.db.metadata.logfile.MLogWriter;
+import org.apache.iotdb.db.metadata.mnode.MNode;
+import org.apache.iotdb.db.metadata.mnode.MeasurementMNode;
+import org.apache.iotdb.db.metadata.mnode.StorageGroupMNode;
+import org.apache.iotdb.db.metadata.template.Template;
+import org.apache.iotdb.db.qp.physical.PhysicalPlan;
+import org.apache.iotdb.db.qp.physical.sys.MNodePlan;
+import org.apache.iotdb.db.qp.physical.sys.MeasurementMNodePlan;
+import org.apache.iotdb.db.qp.physical.sys.ShowDevicesPlan;
+import org.apache.iotdb.db.qp.physical.sys.ShowTimeSeriesPlan;
+import org.apache.iotdb.db.qp.physical.sys.StorageGroupMNodePlan;
+import org.apache.iotdb.db.query.context.QueryContext;
+import org.apache.iotdb.db.query.control.QueryResourceManager;
+import org.apache.iotdb.db.query.dataset.ShowDevicesResult;
+import org.apache.iotdb.db.query.executor.fill.LastPointReader;
+import org.apache.iotdb.db.utils.TestOnly;
+import org.apache.iotdb.tsfile.file.metadata.enums.CompressionType;
+import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
+import org.apache.iotdb.tsfile.file.metadata.enums.TSEncoding;
+import org.apache.iotdb.tsfile.read.TimeValuePair;
+import org.apache.iotdb.tsfile.utils.Pair;
+import org.apache.iotdb.tsfile.write.schema.IMeasurementSchema;
+import org.apache.iotdb.tsfile.write.schema.MeasurementSchema;
+import org.apache.iotdb.tsfile.write.schema.VectorMeasurementSchema;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayDeque;
@@ -49,39 +83,17 @@ import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
-import org.apache.iotdb.db.conf.IoTDBConfig;
-import org.apache.iotdb.db.conf.IoTDBConstant;
-import org.apache.iotdb.db.conf.IoTDBDescriptor;
-import org.apache.iotdb.db.engine.fileSystem.SystemFileFactory;
-import org.apache.iotdb.db.engine.querycontext.QueryDataSource;
-import org.apache.iotdb.db.exception.metadata.AliasAlreadyExistException;
-import org.apache.iotdb.db.exception.metadata.IllegalPathException;
-import org.apache.iotdb.db.exception.metadata.MetadataException;
-import org.apache.iotdb.db.exception.metadata.PathAlreadyExistException;
-import org.apache.iotdb.db.exception.metadata.PathNotExistException;
-import org.apache.iotdb.db.exception.metadata.StorageGroupAlreadySetException;
-import org.apache.iotdb.db.exception.metadata.StorageGroupNotSetException;
-import org.apache.iotdb.db.metadata.MManager.StorageGroupFilter;
-import org.apache.iotdb.db.metadata.mnode.MNode;
-import org.apache.iotdb.db.metadata.mnode.MeasurementMNode;
-import org.apache.iotdb.db.metadata.mnode.StorageGroupMNode;
-import org.apache.iotdb.db.qp.physical.sys.ShowTimeSeriesPlan;
-import org.apache.iotdb.db.query.context.QueryContext;
-import org.apache.iotdb.db.query.control.QueryResourceManager;
-import org.apache.iotdb.db.query.executor.fill.LastPointReader;
-import org.apache.iotdb.db.utils.TestOnly;
-import org.apache.iotdb.tsfile.file.metadata.enums.CompressionType;
-import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
-import org.apache.iotdb.tsfile.file.metadata.enums.TSEncoding;
-import org.apache.iotdb.tsfile.read.TimeValuePair;
-import org.apache.iotdb.tsfile.utils.Pair;
-import org.apache.iotdb.tsfile.write.schema.MeasurementSchema;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-/**
- * The hierarchical struct of the Metadata Tree is implemented in this class.
- */
+import static java.util.stream.Collectors.toList;
+import static org.apache.iotdb.db.conf.IoTDBConstant.LOSS;
+import static org.apache.iotdb.db.conf.IoTDBConstant.PATH_SEPARATOR;
+import static org.apache.iotdb.db.conf.IoTDBConstant.PATH_WILDCARD;
+import static org.apache.iotdb.db.conf.IoTDBConstant.SDT;
+import static org.apache.iotdb.db.conf.IoTDBConstant.SDT_COMP_DEV;
+import static org.apache.iotdb.db.conf.IoTDBConstant.SDT_COMP_MAX_TIME;
+import static org.apache.iotdb.db.conf.IoTDBConstant.SDT_COMP_MIN_TIME;
+
+/** The hierarchical struct of the Metadata Tree is implemented in this class. */
 public class MTree implements Serializable {
 
   public static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -108,70 +120,29 @@ public class MTree implements Serializable {
       return node.getCachedLast().getTimestamp();
     } else {
       try {
-        QueryDataSource dataSource = QueryResourceManager.getInstance().
-                getQueryDataSource(node.getPartialPath(), queryContext, null);
+        QueryDataSource dataSource =
+            QueryResourceManager.getInstance()
+                .getQueryDataSource(node.getPartialPath(), queryContext, null);
         Set<String> measurementSet = new HashSet<>();
         measurementSet.add(node.getPartialPath().getFullPath());
-        LastPointReader lastReader = new LastPointReader(node.getPartialPath(),
-                node.getSchema().getType(), measurementSet, queryContext,
-                dataSource, Long.MAX_VALUE, null);
+        LastPointReader lastReader =
+            new LastPointReader(
+                node.getPartialPath(),
+                node.getSchema().getType(),
+                measurementSet,
+                queryContext,
+                dataSource,
+                Long.MAX_VALUE,
+                null);
         last = lastReader.readLastPoint();
         return (last != null ? last.getTimestamp() : Long.MIN_VALUE);
       } catch (Exception e) {
-        logger.error("Something wrong happened while trying to get last time value pair of {}",
-            node.getFullPath(), e);
+        logger.error(
+            "Something wrong happened while trying to get last time value pair of {}",
+            node.getFullPath(),
+            e);
         return Long.MIN_VALUE;
       }
-    }
-  }
-
-  @SuppressWarnings("squid:S3776") // Suppress high Cognitive Complexity warning
-  public static MTree deserializeFrom(File mtreeSnapshot) {
-    try (BufferedReader br = new BufferedReader(new FileReader(mtreeSnapshot))) {
-      String s;
-      Deque<MNode> nodeStack = new ArrayDeque<>();
-      MNode node = null;
-
-      while ((s = br.readLine()) != null) {
-        String[] nodeInfo = s.split(",");
-        short nodeType = Short.parseShort(nodeInfo[0]);
-        if (nodeType == MetadataConstant.STORAGE_GROUP_MNODE_TYPE) {
-          node = StorageGroupMNode.deserializeFrom(nodeInfo);
-        } else if (nodeType == MetadataConstant.MEASUREMENT_MNODE_TYPE) {
-          node = MeasurementMNode.deserializeFrom(nodeInfo);
-        } else {
-          node = new MNode(null, nodeInfo[1]);
-        }
-
-        int childrenSize = Integer.parseInt(nodeInfo[nodeInfo.length - 1]);
-        if (childrenSize == 0) {
-          nodeStack.push(node);
-        } else {
-          ConcurrentHashMap<String, MNode> childrenMap = new ConcurrentHashMap<>();
-          for (int i = 0; i < childrenSize; i++) {
-            MNode child = nodeStack.removeFirst();
-            child.setParent(node);
-            childrenMap.put(child.getName(), child);
-            if (child instanceof MeasurementMNode) {
-              String alias = ((MeasurementMNode) child).getAlias();
-              if (alias != null) {
-                node.addAlias(alias, child);
-              }
-            }
-          }
-          node.setChildren(childrenMap);
-          nodeStack.push(node);
-        }
-      }
-      return new MTree(node);
-    } catch (IOException e) {
-      logger.warn("Failed to deserialize from {}. Use a new MTree.", mtreeSnapshot.getPath());
-      return new MTree();
-    } finally {
-      limit = new ThreadLocal<>();
-      offset = new ThreadLocal<>();
-      count = new ThreadLocal<>();
-      curOffset = new ThreadLocal<>();
     }
   }
 
@@ -179,9 +150,7 @@ public class MTree implements Serializable {
     return GSON.toJson(jsonObject);
   }
 
-  /**
-   * combine multiple metadata in string format
-   */
+  /** combine multiple metadata in string format */
   @TestOnly
   static JsonObject combineMetadataInStrings(String[] metadataStrs) {
     JsonObject[] jsonObjects = new JsonObject[metadataStrs.length];
@@ -227,25 +196,32 @@ public class MTree implements Serializable {
   }
 
   /**
-   * Create a timeseries with a full path from root to leaf node Before creating a timeseries, the
+   * Create a timeseries with a full path from root to leaf node. Before creating a timeseries, the
    * storage group should be set first, throw exception otherwise
    *
-   * @param path       timeseries path
-   * @param dataType   data type
-   * @param encoding   encoding
+   * @param path timeseries path
+   * @param dataType data type
+   * @param encoding encoding
    * @param compressor compressor
-   * @param props      props
-   * @param alias      alias of measurement
+   * @param props props
+   * @param alias alias of measurement
    */
-  MeasurementMNode createTimeseries(PartialPath path, TSDataType dataType, TSEncoding encoding,
-      CompressionType compressor, Map<String, String> props, String alias)
+  MeasurementMNode createTimeseries(
+      PartialPath path,
+      TSDataType dataType,
+      TSEncoding encoding,
+      CompressionType compressor,
+      Map<String, String> props,
+      String alias)
       throws MetadataException {
     String[] nodeNames = path.getNodes();
     if (nodeNames.length <= 2 || !nodeNames[0].equals(root.getName())) {
       throw new IllegalPathException(path.getFullPath());
     }
+    checkTimeseries(path.getFullPath());
     MNode cur = root;
     boolean hasSetStorageGroup = false;
+    Template upperTemplate = cur.getDeviceTemplate();
     // e.g, path = root.sg.d1.s1,  create internal nodes and set cur to d1 node
     for (int i = 1; i < nodeNames.length - 1; i++) {
       String nodeName = nodeNames[i];
@@ -259,30 +235,186 @@ public class MTree implements Serializable {
         cur.addChild(nodeName, new MNode(cur, nodeName));
       }
       cur = cur.getChild(nodeName);
+
+      if (cur.getDeviceTemplate() != null) {
+        upperTemplate = cur.getDeviceTemplate();
+      }
     }
+
+    if (upperTemplate != null && !upperTemplate.isCompatible(path)) {
+      throw new PathAlreadyExistException(
+          path.getFullPath() + " ( which is incompatible with template )");
+    }
+
+    if (props != null && props.containsKey(LOSS) && props.get(LOSS).equals(SDT)) {
+      checkSDTFormat(path.getFullPath(), props);
+    }
+
     String leafName = nodeNames[nodeNames.length - 1];
 
     // synchronize check and add, we need addChild and add Alias become atomic operation
     // only write on mtree will be synchronized
     synchronized (this) {
-      if (cur.hasChild(leafName)) {
+      MNode child = cur.getChild(leafName);
+      if (child instanceof MeasurementMNode || child instanceof StorageGroupMNode) {
         throw new PathAlreadyExistException(path.getFullPath());
       }
-      if (alias != null && cur.hasChild(alias)) {
-        throw new AliasAlreadyExistException(path.getFullPath(), alias);
-      }
-      MeasurementMNode leaf = new MeasurementMNode(cur, leafName, alias, dataType, encoding,
-          compressor, props);
 
-      cur.addChild(leafName, leaf);
+      if (alias != null) {
+        MNode childByAlias = cur.getChild(alias);
+        if (childByAlias instanceof MeasurementMNode) {
+          throw new AliasAlreadyExistException(path.getFullPath(), alias);
+        }
+      }
+
+      // this measurementMNode could be a leaf or not.
+      MeasurementMNode measurementMNode =
+          new MeasurementMNode(cur, leafName, alias, dataType, encoding, compressor, props);
+      if (child != null) {
+        cur.replaceChild(measurementMNode.getName(), measurementMNode);
+      } else {
+        cur.addChild(leafName, measurementMNode);
+      }
 
       // link alias to LeafMNode
       if (alias != null) {
-        cur.addAlias(alias, leaf);
+        cur.addAlias(alias, measurementMNode);
       }
 
-      return leaf;
+      return measurementMNode;
     }
+  }
+
+  /**
+   * Create aligned timeseries with full paths from root to one leaf node. Before creating
+   * timeseries, the * storage group should be set first, throw exception otherwise
+   *
+   * @param devicePath device path
+   * @param measurements measurements list
+   * @param dataTypes data types list
+   * @param encodings encodings list
+   * @param compressor compressor
+   */
+  void createAlignedTimeseries(
+      PartialPath devicePath,
+      List<String> measurements,
+      List<TSDataType> dataTypes,
+      List<TSEncoding> encodings,
+      CompressionType compressor)
+      throws MetadataException {
+    String[] deviceNodeNames = devicePath.getNodes();
+    if (deviceNodeNames.length <= 1 || !deviceNodeNames[0].equals(root.getName())) {
+      throw new IllegalPathException(devicePath.getFullPath());
+    }
+    checkTimeseries(devicePath.getFullPath());
+    for (String measurement : measurements) {
+      checkTimeseries(measurement);
+    }
+    MNode cur = root;
+    boolean hasSetStorageGroup = false;
+    // e.g, devicePath = root.sg.d1, create internal nodes and set cur to d1 node
+    for (int i = 1; i < deviceNodeNames.length - 1; i++) {
+      String nodeName = deviceNodeNames[i];
+      if (cur instanceof StorageGroupMNode) {
+        hasSetStorageGroup = true;
+      }
+      if (!cur.hasChild(nodeName)) {
+        if (!hasSetStorageGroup) {
+          throw new StorageGroupNotSetException("Storage group should be created first");
+        }
+        cur.addChild(nodeName, new MNode(cur, nodeName));
+      }
+      cur = cur.getChild(nodeName);
+    }
+    String leafName = deviceNodeNames[deviceNodeNames.length - 1];
+
+    // synchronize check and add, we need addChild and add Alias become atomic operation
+    // only write on mtree will be synchronized
+    synchronized (this) {
+      MNode child = cur.getChild(leafName);
+      if (child instanceof MeasurementMNode || child instanceof StorageGroupMNode) {
+        throw new PathAlreadyExistException(devicePath.getFullPath() + "." + leafName);
+      }
+
+      int measurementsSize = measurements.size();
+
+      // this measurementMNode could be a leaf or not.
+      MeasurementMNode measurementMNode =
+          new MeasurementMNode(
+              cur,
+              leafName,
+              new VectorMeasurementSchema(
+                  leafName,
+                  measurements.toArray(new String[measurementsSize]),
+                  dataTypes.toArray(new TSDataType[measurementsSize]),
+                  encodings.toArray(new TSEncoding[measurementsSize]),
+                  compressor),
+              null);
+      cur.addChild(leafName, measurementMNode);
+
+      for (String measurement : measurements) {
+        if (child != null) {
+          measurementMNode.replaceChild(measurement, new MNode(measurementMNode, measurement));
+        } else {
+          measurementMNode.addChild(measurement, new MNode(measurementMNode, measurement));
+        }
+      }
+    }
+  }
+
+  private void checkTimeseries(String timeseries) throws IllegalPathException {
+    if (!IoTDBConfig.NODE_PATTERN.matcher(timeseries).matches()) {
+      throw new IllegalPathException(
+          String.format("The timeseries name contains unsupported character. %s", timeseries));
+    }
+  }
+
+  // check if sdt parameters are valid
+  private void checkSDTFormat(String path, Map<String, String> props)
+      throws IllegalParameterOfPathException {
+    if (!props.containsKey(SDT_COMP_DEV)) {
+      throw new IllegalParameterOfPathException("SDT compression deviation is required", path);
+    }
+
+    try {
+      double d = Double.parseDouble(props.get(SDT_COMP_DEV));
+      if (d < 0) {
+        throw new IllegalParameterOfPathException(
+            "SDT compression deviation cannot be negative", path);
+      }
+    } catch (NumberFormatException e) {
+      throw new IllegalParameterOfPathException("SDT compression deviation formatting error", path);
+    }
+
+    long compMinTime = sdtCompressionTimeFormat(SDT_COMP_MIN_TIME, props, path);
+    long compMaxTime = sdtCompressionTimeFormat(SDT_COMP_MAX_TIME, props, path);
+
+    if (compMaxTime <= compMinTime) {
+      throw new IllegalParameterOfPathException(
+          "SDT compression maximum time needs to be greater than compression minimum time", path);
+    }
+  }
+
+  private long sdtCompressionTimeFormat(String compTime, Map<String, String> props, String path)
+      throws IllegalParameterOfPathException {
+    boolean isCompMaxTime = compTime.equals(SDT_COMP_MAX_TIME);
+    long time = isCompMaxTime ? Long.MAX_VALUE : 0;
+    String s = isCompMaxTime ? "maximum" : "minimum";
+    if (props.containsKey(compTime)) {
+      try {
+        time = Long.parseLong(props.get(compTime));
+        if (time < 0) {
+          throw new IllegalParameterOfPathException(
+              String.format("SDT compression %s time cannot be negative", s), path);
+        }
+      } catch (IllegalParameterOfPathException e) {
+        throw new IllegalParameterOfPathException(
+            String.format("SDT compression %s time formatting error", s), path);
+      }
+    } else {
+      logger.info("{} enabled SDT but did not set compression {} time", path, s);
+    }
+    return time;
   }
 
   /**
@@ -290,24 +422,31 @@ public class MTree implements Serializable {
    *
    * <p>e.g., get root.sg.d1, get or create all internal nodes and return the node of d1
    */
-  MNode getDeviceNodeWithAutoCreating(PartialPath deviceId, int sgLevel) throws MetadataException {
+  Pair<MNode, Template> getDeviceNodeWithAutoCreating(PartialPath deviceId, int sgLevel)
+      throws MetadataException {
     String[] nodeNames = deviceId.getNodes();
     if (nodeNames.length <= 1 || !nodeNames[0].equals(root.getName())) {
       throw new IllegalPathException(deviceId.getFullPath());
     }
     MNode cur = root;
+    Template upperTemplate = null;
     for (int i = 1; i < nodeNames.length; i++) {
       if (!cur.hasChild(nodeNames[i])) {
         if (i == sgLevel) {
-          cur.addChild(nodeNames[i], new StorageGroupMNode(cur, nodeNames[i],
-              IoTDBDescriptor.getInstance().getConfig().getDefaultTTL()));
+          cur.addChild(
+              nodeNames[i],
+              new StorageGroupMNode(
+                  cur, nodeNames[i], IoTDBDescriptor.getInstance().getConfig().getDefaultTTL()));
         } else {
           cur.addChild(nodeNames[i], new MNode(cur, nodeNames[i]));
         }
       }
+      // update upper template
+      upperTemplate = cur.getDeviceTemplate() == null ? upperTemplate : cur.getDeviceTemplate();
       cur = cur.getChild(nodeNames[i]);
     }
-    return cur;
+
+    return new Pair<>(cur, upperTemplate);
   }
 
   /**
@@ -324,7 +463,10 @@ public class MTree implements Serializable {
     for (int i = 1; i < nodeNames.length; i++) {
       String childName = nodeNames[i];
       cur = cur.getChild(childName);
-      if (cur == null) {
+      if (cur instanceof MeasurementMNode
+          && ((MeasurementMNode) cur).getSchema() instanceof VectorMeasurementSchema) {
+        return i == nodeNames.length - 1 || cur.getChildren().containsKey(nodeNames[i + 1]);
+      } else if (cur == null) {
         return false;
       }
     }
@@ -358,7 +500,11 @@ public class MTree implements Serializable {
     }
     if (cur.hasChild(nodeNames[i])) {
       // node b has child sg
-      throw new StorageGroupAlreadySetException(path.getFullPath());
+      if (cur.getChild(nodeNames[i]) instanceof StorageGroupMNode) {
+        throw new StorageGroupAlreadySetException(path.getFullPath());
+      } else {
+        throw new StorageGroupAlreadySetException(path.getFullPath(), true);
+      }
     } else {
       StorageGroupMNode storageGroupMNode =
           new StorageGroupMNode(
@@ -369,15 +515,14 @@ public class MTree implements Serializable {
 
   private void checkStorageGroup(String storageGroup) throws IllegalPathException {
     if (!IoTDBConfig.STORAGE_GROUP_PATTERN.matcher(storageGroup).matches()) {
-      throw new IllegalPathException(String
-          .format("The storage group name can only be characters, numbers and underscores. %s",
+      throw new IllegalPathException(
+          String.format(
+              "The storage group name can only be characters, numbers and underscores. %s",
               storageGroup));
     }
   }
 
-  /**
-   * Delete a storage group
-   */
+  /** Delete a storage group */
   List<MeasurementMNode> deleteStorageGroup(PartialPath path) throws MetadataException {
     MNode cur = getNodeByPath(path);
     if (!(cur instanceof StorageGroupMNode)) {
@@ -453,15 +598,18 @@ public class MTree implements Serializable {
     if (nodes.length == 0 || !IoTDBConstant.PATH_ROOT.equals(nodes[0])) {
       throw new IllegalPathException(path.getFullPath());
     }
-    // delete the last node of path
-    curNode.getParent().deleteChild(curNode.getName());
+
     MeasurementMNode deletedNode = (MeasurementMNode) curNode;
+
+    // delete the last node of path
+    curNode.getParent().deleteChild(path.getMeasurement());
     if (deletedNode.getAlias() != null) {
       curNode.getParent().deleteAliasChild(((MeasurementMNode) curNode).getAlias());
     }
     curNode = curNode.getParent();
-    // delete all empty ancestors except storage group
+    // delete all empty ancestors except storage group and MeasurementMNode
     while (!IoTDBConstant.PATH_ROOT.equals(curNode.getName())
+        && !(curNode instanceof MeasurementMNode)
         && curNode.getChildren().size() == 0) {
       // if current storage group has no time series, return the storage group name
       if (curNode instanceof StorageGroupMNode) {
@@ -476,7 +624,7 @@ public class MTree implements Serializable {
   /**
    * Get measurement schema for a given path. Path must be a complete Path from root to leaf node.
    */
-  MeasurementSchema getSchema(PartialPath path) throws MetadataException {
+  IMeasurementSchema getSchema(PartialPath path) throws MetadataException {
     MeasurementMNode node = (MeasurementMNode) getNodeByPath(path);
     return node.getSchema();
   }
@@ -485,7 +633,8 @@ public class MTree implements Serializable {
    * Get node by path with storage group check If storage group is not set,
    * StorageGroupNotSetException will be thrown
    */
-  MNode getNodeByPathWithStorageGroupCheck(PartialPath path) throws MetadataException {
+  Pair<MNode, Template> getNodeByPathWithStorageGroupCheck(PartialPath path)
+      throws MetadataException {
     boolean storageGroupChecked = false;
     String[] nodes = path.getNodes();
     if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
@@ -493,7 +642,10 @@ public class MTree implements Serializable {
     }
 
     MNode cur = root;
+    Template upperTemplate = null;
+
     for (int i = 1; i < nodes.length; i++) {
+      upperTemplate = cur.getDeviceTemplate() == null ? upperTemplate : cur.getDeviceTemplate();
       cur = cur.getChild(nodes[i]);
       if (cur == null) {
         // not find
@@ -511,7 +663,7 @@ public class MTree implements Serializable {
     if (!storageGroupChecked) {
       throw new StorageGroupNotSetException(path.getFullPath());
     }
-    return cur;
+    return new Pair<>(cur, upperTemplate);
   }
 
   /**
@@ -525,7 +677,7 @@ public class MTree implements Serializable {
     if (node instanceof StorageGroupMNode) {
       return (StorageGroupMNode) node;
     } else {
-      throw new StorageGroupNotSetException(path.getFullPath());
+      throw new StorageGroupNotSetException(path.getFullPath(), true);
     }
   }
 
@@ -541,6 +693,9 @@ public class MTree implements Serializable {
     }
     MNode cur = root;
     for (int i = 1; i < nodes.length; i++) {
+      if (cur == null) {
+        break;
+      }
       cur = cur.getChild(nodes[i]);
       if (cur instanceof StorageGroupMNode) {
         return (StorageGroupMNode) cur;
@@ -560,11 +715,30 @@ public class MTree implements Serializable {
       throw new IllegalPathException(path.getFullPath());
     }
     MNode cur = root;
+    Template upperTemplate = cur.getDeviceTemplate();
+
     for (int i = 1; i < nodes.length; i++) {
-      cur = cur.getChild(nodes[i]);
-      if (cur == null) {
-        throw new PathNotExistException(path.getFullPath());
+      if (cur.getDeviceTemplate() != null) {
+        upperTemplate = cur.getDeviceTemplate();
       }
+      MNode next = cur.getChild(nodes[i]);
+      if (cur instanceof MeasurementMNode
+          && ((MeasurementMNode) cur).getSchema() instanceof VectorMeasurementSchema) {
+        return cur;
+      }
+      if (next == null) {
+        if (upperTemplate == null) {
+          throw new PathNotExistException(path.getFullPath(), true);
+        }
+
+        String realName = nodes[i];
+        IMeasurementSchema schema = upperTemplate.getSchemaMap().get(realName);
+        if (schema == null) {
+          throw new PathNotExistException(path.getFullPath(), true);
+        }
+        return new MeasurementMNode(cur, schema.getMeasurementId(), schema, null);
+      }
+      cur = next;
     }
     return cur;
   }
@@ -601,11 +775,7 @@ public class MTree implements Serializable {
       MNode next = node.getChild(nodeReg);
       if (next != null) {
         findStorageGroup(
-            next,
-            nodes,
-            idx + 1,
-            parent + node.getName() + PATH_SEPARATOR,
-            storageGroupNames);
+            next, nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR, storageGroupNames);
       }
     } else {
       for (MNode child : node.getChildren().values()) {
@@ -636,12 +806,11 @@ public class MTree implements Serializable {
   }
 
   /**
-   * Get the storage group that given path belonged to or under given path
-   * All related storage groups refer two cases:
-   * 1. Storage groups with a prefix that is identical to path, e.g. given path "root.sg1",
-   *    storage group "root.sg1.sg2" and "root.sg1.sg3" will be added into result list.
-   * 2. Storage group that this path belongs to, e.g. given path "root.sg1.d1", and it is in
-   *    storage group "root.sg1". Then we adds "root.sg1" into result list.
+   * Get the storage group that given path belonged to or under given path All related storage
+   * groups refer two cases: 1. Storage groups with a prefix that is identical to path, e.g. given
+   * path "root.sg1", storage group "root.sg1.sg2" and "root.sg1.sg3" will be added into result
+   * list. 2. Storage group that this path belongs to, e.g. given path "root.sg1.d1", and it is in
+   * storage group "root.sg1". Then we adds "root.sg1" into result list.
    *
    * @return a list contains all storage groups related to given path
    */
@@ -671,23 +840,26 @@ public class MTree implements Serializable {
   }
 
   /**
-   * Traverse the MTree to match all storage group with prefix path.
-   * When trying to find storage groups via a path, we divide into two cases:
-   * 1. This path is only regarded as a prefix, in other words, this path is part of the result
-   *    storage groups.
-   * 2. This path is a full path and we use this method to find its belonged storage group.
-   * When prefixOnly is set to true, storage group paths in 1 is only added into result,
-   * otherwise, both 1 and 2 are returned.
+   * Traverse the MTree to match all storage group with prefix path. When trying to find storage
+   * groups via a path, we divide into two cases: 1. This path is only regarded as a prefix, in
+   * other words, this path is part of the result storage groups. 2. This path is a full path and we
+   * use this method to find its belonged storage group. When prefixOnly is set to true, storage
+   * group paths in 1 is only added into result, otherwise, both 1 and 2 are returned.
    *
-   * @param node              the current traversing node
-   * @param nodes             split the prefix path with '.'
-   * @param idx               the current index of array nodes
-   * @param parent            current parent path
+   * @param node the current traversing node
+   * @param nodes split the prefix path with '.'
+   * @param idx the current index of array nodes
+   * @param parent current parent path
    * @param storageGroupPaths store all matched storage group names
-   * @param prefixOnly        only return storage groups that start with this prefix path
+   * @param prefixOnly only return storage groups that start with this prefix path
    */
-  private void findStorageGroupPaths(MNode node, String[] nodes, int idx, String parent,
-      List<PartialPath> storageGroupPaths, boolean prefixOnly) {
+  private void findStorageGroupPaths(
+      MNode node,
+      String[] nodes,
+      int idx,
+      String parent,
+      List<PartialPath> storageGroupPaths,
+      boolean prefixOnly) {
     if (node instanceof StorageGroupMNode && (!prefixOnly || idx >= nodes.length)) {
       storageGroupPaths.add(node.getPartialPath());
       return;
@@ -696,21 +868,28 @@ public class MTree implements Serializable {
     if (!(PATH_WILDCARD).equals(nodeReg)) {
       MNode next = node.getChild(nodeReg);
       if (next != null) {
-        findStorageGroupPaths(node.getChild(nodeReg), nodes, idx + 1,
-            parent + node.getName() + PATH_SEPARATOR, storageGroupPaths, prefixOnly);
+        findStorageGroupPaths(
+            node.getChild(nodeReg),
+            nodes,
+            idx + 1,
+            parent + node.getName() + PATH_SEPARATOR,
+            storageGroupPaths,
+            prefixOnly);
       }
     } else {
       for (MNode child : node.getChildren().values()) {
         findStorageGroupPaths(
-            child, nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR, storageGroupPaths,
+            child,
+            nodes,
+            idx + 1,
+            parent + node.getName() + PATH_SEPARATOR,
+            storageGroupPaths,
             prefixOnly);
       }
     }
   }
 
-  /**
-   * Get all storage group MNodes
-   */
+  /** Get all storage group MNodes */
   List<StorageGroupMNode> getAllStorageGroupNodes() {
     List<StorageGroupMNode> ret = new ArrayList<>();
     Deque<MNode> nodeStack = new ArrayDeque<>();
@@ -747,9 +926,7 @@ public class MTree implements Serializable {
     throw new StorageGroupNotSetException(path.getFullPath());
   }
 
-  /**
-   * Check whether the given path contains a storage group
-   */
+  /** Check whether the given path contains a storage group */
   boolean checkStorageGroupByPath(PartialPath path) {
     String[] nodes = path.getNodes();
     MNode cur = root;
@@ -783,11 +960,11 @@ public class MTree implements Serializable {
    * Get all timeseries paths under the given path
    *
    * @param prefixPath a prefix path or a full path, may contain '*'.
-   *
-   * @return Pair.left  contains all the satisfied paths
-   *         Pair.right means the current offset or zero if we don't set offset.
+   * @return Pair.left contains all the satisfied paths Pair.right means the current offset or zero
+   *     if we don't set offset.
    */
-  Pair<List<PartialPath>, Integer> getAllTimeseriesPathWithAlias(PartialPath prefixPath, int limit, int offset) throws MetadataException {
+  Pair<List<PartialPath>, Integer> getAllTimeseriesPathWithAlias(
+      PartialPath prefixPath, int limit, int offset) throws MetadataException {
     PartialPath prePath = new PartialPath(prefixPath.getNodes());
     ShowTimeSeriesPlan plan = new ShowTimeSeriesPlan(prefixPath);
     plan.setLimit(limit);
@@ -810,7 +987,8 @@ public class MTree implements Serializable {
   }
 
   /**
-   * Get the count of timeseries under the given prefix path.
+   * Get the count of timeseries under the given prefix path. if prefixPath contains '*', then not
+   * throw PathNotExistException()
    *
    * @param prefixPath a prefix path or a full path, may contain '*'.
    */
@@ -819,7 +997,41 @@ public class MTree implements Serializable {
     if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
       throw new IllegalPathException(prefixPath.getFullPath());
     }
-    return getCount(root, nodes, 1);
+    try {
+      return getCount(root, nodes, 1, false);
+    } catch (PathNotExistException e) {
+      throw new PathNotExistException(prefixPath.getFullPath());
+    }
+  }
+
+  /** Traverse the MTree to get the count of timeseries. */
+  private int getCount(MNode node, String[] nodes, int idx, boolean wildcard)
+      throws PathNotExistException {
+    if (idx < nodes.length) {
+      if (PATH_WILDCARD.equals(nodes[idx])) {
+        int sum = 0;
+        for (MNode child : node.getChildren().values()) {
+          sum += getCount(child, nodes, idx + 1, true);
+        }
+        return sum;
+      } else {
+        MNode child = node.getChild(nodes[idx]);
+        if (child == null) {
+          if (!wildcard) {
+            throw new PathNotExistException(node.getName() + NO_CHILDNODE_MSG + nodes[idx]);
+          } else {
+            return 0;
+          }
+        }
+        return getCount(child, nodes, idx + 1, wildcard);
+      }
+    } else {
+      int sum = node instanceof MeasurementMNode ? 1 : 0;
+      for (MNode child : node.getChildren().values()) {
+        sum += getCount(child, nodes, idx + 1, wildcard);
+      }
+      return sum;
+    }
   }
 
   /**
@@ -848,9 +1060,7 @@ public class MTree implements Serializable {
     return getStorageGroupCount(root, nodes, 1, "");
   }
 
-  /**
-   * Get the count of nodes in the given level under the given prefix path.
-   */
+  /** Get the count of nodes in the given level under the given prefix path. */
   int getNodesCountInGivenLevel(PartialPath prefixPath, int level) throws MetadataException {
     String[] nodes = prefixPath.getNodes();
     if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
@@ -871,38 +1081,8 @@ public class MTree implements Serializable {
     return getCountInGivenLevel(node, level - (i - 1));
   }
 
-  /**
-   * Traverse the MTree to get the count of timeseries.
-   */
-  private int getCount(MNode node, String[] nodes, int idx) {
-    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
-    if (!(PATH_WILDCARD).equals(nodeReg)) {
-      MNode next = node.getChild(nodeReg);
-      if (next != null) {
-        if (next instanceof MeasurementMNode) {
-          return 1;
-        } else {
-          return getCount(next, nodes, idx + 1);
-        }
-      } else {
-        return 0;
-      }
-    } else {
-      int cnt = 0;
-      for (MNode child : node.getChildren().values()) {
-        if (child instanceof MeasurementMNode) {
-          cnt++;
-        }
-        cnt += getCount(child, nodes, idx + 1);
-      }
-      return cnt;
-    }
-  }
-
-  /**
-   * Traverse the MTree to get the count of devices.
-   */
-  private int getDevicesCount(MNode node, String[] nodes, int idx) throws MetadataException {
+  /** Traverse the MTree to get the count of devices. */
+  private int getDevicesCount(MNode node, String[] nodes, int idx) {
     String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
     int cnt = 0;
     if (!(PATH_WILDCARD).equals(nodeReg)) {
@@ -927,11 +1107,8 @@ public class MTree implements Serializable {
     return cnt;
   }
 
-  /**
-   * Traverse the MTree to get the count of storage group.
-   */
-  private int getStorageGroupCount(
-      MNode node, String[] nodes, int idx, String parent) throws MetadataException {
+  /** Traverse the MTree to get the count of storage group. */
+  private int getStorageGroupCount(MNode node, String[] nodes, int idx, String parent) {
     int cnt = 0;
     if (node instanceof StorageGroupMNode && idx >= nodes.length) {
       cnt++;
@@ -941,13 +1118,12 @@ public class MTree implements Serializable {
     if (!(PATH_WILDCARD).equals(nodeReg)) {
       MNode next = node.getChild(nodeReg);
       if (next != null) {
-        cnt += getStorageGroupCount(next,
-            nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR);
+        cnt += getStorageGroupCount(next, nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR);
       }
     } else {
       for (MNode child : node.getChildren().values()) {
-        cnt += getStorageGroupCount(
-            child, nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR);
+        cnt +=
+            getStorageGroupCount(child, nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR);
       }
     }
     return cnt;
@@ -974,20 +1150,23 @@ public class MTree implements Serializable {
    *
    * <p>result: [name, alias, storage group, dataType, encoding, compression, offset]
    */
-  List<Pair<PartialPath, String[]>> getAllMeasurementSchemaByHeatOrder(ShowTimeSeriesPlan plan,
-      QueryContext queryContext) throws MetadataException {
+  List<Pair<PartialPath, String[]>> getAllMeasurementSchemaByHeatOrder(
+      ShowTimeSeriesPlan plan, QueryContext queryContext) throws MetadataException {
     String[] nodes = plan.getPath().getNodes();
     if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
       throw new IllegalPathException(plan.getPath().getFullPath());
     }
     List<Pair<PartialPath, String[]>> allMatchedNodes = new ArrayList<>();
 
-    findPath(root, nodes, 1, allMatchedNodes, false, true, queryContext);
+    findPath(root, nodes, 1, allMatchedNodes, false, true, queryContext, null);
 
-    Stream<Pair<PartialPath, String[]>> sortedStream = allMatchedNodes.stream().sorted(
-        Comparator.comparingLong((Pair<PartialPath, String[]> p) -> Long.parseLong(p.right[6]))
-            .reversed()
-            .thenComparing((Pair<PartialPath, String[]> p) -> p.left));
+    Stream<Pair<PartialPath, String[]>> sortedStream =
+        allMatchedNodes.stream()
+            .sorted(
+                Comparator.comparingLong(
+                        (Pair<PartialPath, String[]> p) -> Long.parseLong(p.right[6]))
+                    .reversed()
+                    .thenComparing((Pair<PartialPath, String[]> p) -> p.left));
 
     // no limit
     if (plan.getLimit() == 0) {
@@ -1007,10 +1186,9 @@ public class MTree implements Serializable {
     return getAllMeasurementSchema(plan, true);
   }
 
-
-  List<Pair<PartialPath, String[]>> getAllMeasurementSchema(ShowTimeSeriesPlan plan, boolean removeCurrentOffset)
-      throws MetadataException {
-    List<Pair<PartialPath, String[]>> res;
+  List<Pair<PartialPath, String[]>> getAllMeasurementSchema(
+      ShowTimeSeriesPlan plan, boolean removeCurrentOffset) throws MetadataException {
+    List<Pair<PartialPath, String[]>> res = new LinkedList<>();
     String[] nodes = plan.getPath().getNodes();
     if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
       throw new IllegalPathException(plan.getPath().getFullPath());
@@ -1019,13 +1197,7 @@ public class MTree implements Serializable {
     offset.set(plan.getOffset());
     curOffset.set(-1);
     count.set(0);
-    if (offset.get() != 0 || limit.get() != 0) {
-      res = new LinkedList<>();
-      findPath(root, nodes, 1, res, true, false, null);
-    } else {
-      res = new LinkedList<>();
-      findPath(root, nodes, 1, res, false, false, null);
-    }
+    findPath(root, nodes, 1, res, offset.get() != 0 || limit.get() != 0, false, null, null);
     // avoid memory leaks
     limit.remove();
     offset.remove();
@@ -1039,26 +1211,134 @@ public class MTree implements Serializable {
   /**
    * Iterate through MTree to fetch metadata info of all leaf nodes under the given seriesPath
    *
-   * @param needLast             if false, lastTimeStamp in timeseriesSchemaList will be null
+   * @param needLast if false, lastTimeStamp in timeseriesSchemaList will be null
    * @param timeseriesSchemaList List<timeseriesSchema> result: [name, alias, storage group,
-   *                             dataType, encoding, compression, offset, lastTimeStamp]
+   *     dataType, encoding, compression, offset, lastTimeStamp]
    */
   @SuppressWarnings("squid:S3776") // Suppress high Cognitive Complexity warning
-  private void findPath(MNode node, String[] nodes, int idx,
+  private void findPath(
+      MNode node,
+      String[] nodes,
+      int idx,
       List<Pair<PartialPath, String[]>> timeseriesSchemaList,
-      boolean hasLimit, boolean needLast, QueryContext queryContext) throws MetadataException {
-    if (node instanceof MeasurementMNode && nodes.length <= idx) {
+      boolean hasLimit,
+      boolean needLast,
+      QueryContext queryContext,
+      Template upperTemplate)
+      throws MetadataException {
+    if (node instanceof MeasurementMNode
+        && (nodes.length <= idx
+            || ((MeasurementMNode) node).getSchema() instanceof VectorMeasurementSchema)) {
       if (hasLimit) {
         curOffset.set(curOffset.get() + 1);
         if (curOffset.get() < offset.get() || count.get().intValue() == limit.get().intValue()) {
           return;
         }
       }
+      IMeasurementSchema measurementSchema = ((MeasurementMNode) node).getSchema();
+      if (measurementSchema instanceof MeasurementSchema) {
+        addMeasurementSchema(
+            node, timeseriesSchemaList, needLast, queryContext, measurementSchema, "*");
+      } else if (measurementSchema instanceof VectorMeasurementSchema) {
+        addVectorMeasurementSchema(
+            node,
+            timeseriesSchemaList,
+            needLast,
+            queryContext,
+            measurementSchema,
+            idx < nodes.length ? nodes[idx] : "*");
+      }
+      if (hasLimit) {
+        count.set(count.get() + 1);
+      }
+    }
 
+    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
+    if (node.getDeviceTemplate() != null) {
+      upperTemplate = node.getDeviceTemplate();
+    }
+
+    // we should use template when all child is measurement or this node has no child
+    if (!nodeReg.contains(PATH_WILDCARD)) {
+      MNode next = node.getChild(nodeReg);
+      if (next != null) {
+        findPath(
+            next,
+            nodes,
+            idx + 1,
+            timeseriesSchemaList,
+            hasLimit,
+            needLast,
+            queryContext,
+            upperTemplate);
+      }
+    } else {
+      for (MNode child : node.getChildren().values()) {
+        if (!Pattern.matches(nodeReg.replace("*", ".*"), child.getName())) {
+          continue;
+        }
+        findPath(
+            child,
+            nodes,
+            idx + 1,
+            timeseriesSchemaList,
+            hasLimit,
+            needLast,
+            queryContext,
+            upperTemplate);
+        if (hasLimit && count.get().intValue() == limit.get().intValue()) {
+          return;
+        }
+      }
+    }
+
+    // template part
+    if (!(node instanceof MeasurementMNode) && node.isUseTemplate()) {
+      if (upperTemplate != null) {
+        HashSet<IMeasurementSchema> set = new HashSet<>();
+        for (IMeasurementSchema schema : upperTemplate.getSchemaMap().values()) {
+          if (set.add(schema)) {
+            if (schema instanceof MeasurementSchema) {
+              addMeasurementSchema(
+                  new MeasurementMNode(node, schema.getMeasurementId(), schema, null),
+                  timeseriesSchemaList,
+                  needLast,
+                  queryContext,
+                  schema,
+                  nodeReg);
+            } else if (schema instanceof VectorMeasurementSchema) {
+              VectorMeasurementSchema vectorMeasurementSchema = (VectorMeasurementSchema) schema;
+              if (Pattern.matches(
+                  nodeReg.replace("*", ".*"), vectorMeasurementSchema.getMeasurementId())) {
+                String firstNode = schema.getValueMeasurementIdList().get(0);
+                addVectorMeasurementSchemaForTemplate(
+                    new MeasurementMNode(node, firstNode, schema, null),
+                    timeseriesSchemaList,
+                    needLast,
+                    queryContext,
+                    schema,
+                    MetaUtils.getNodeRegByIdx(idx + 1, nodes),
+                    vectorMeasurementSchema.getMeasurementId());
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  private void addMeasurementSchema(
+      MNode node,
+      List<Pair<PartialPath, String[]>> timeseriesSchemaList,
+      boolean needLast,
+      QueryContext queryContext,
+      IMeasurementSchema measurementSchema,
+      String reg)
+      throws StorageGroupNotSetException {
+    if (Pattern.matches(reg.replace("*", ".*"), measurementSchema.getMeasurementId())) {
       PartialPath nodePath = node.getPartialPath();
       String[] tsRow = new String[7];
       tsRow[0] = ((MeasurementMNode) node).getAlias();
-      MeasurementSchema measurementSchema = ((MeasurementMNode) node).getSchema();
       tsRow[1] = getStorageGroupPath(nodePath).getFullPath();
       tsRow[2] = measurementSchema.getType().toString();
       tsRow[3] = measurementSchema.getEncodingType().toString();
@@ -1068,28 +1348,66 @@ public class MTree implements Serializable {
           needLast ? String.valueOf(getLastTimeStamp((MeasurementMNode) node, queryContext)) : null;
       Pair<PartialPath, String[]> temp = new Pair<>(nodePath, tsRow);
       timeseriesSchemaList.add(temp);
-
-      if (hasLimit) {
-        count.set(count.get() + 1);
-      }
     }
-    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
-    if (!nodeReg.contains(PATH_WILDCARD)) {
-      MNode next = node.getChild(nodeReg);
-      if (next != null) {
-        findPath(next, nodes, idx + 1, timeseriesSchemaList, hasLimit, needLast,
-            queryContext);
+  }
+
+  private void addVectorMeasurementSchema(
+      MNode node,
+      List<Pair<PartialPath, String[]>> timeseriesSchemaList,
+      boolean needLast,
+      QueryContext queryContext,
+      IMeasurementSchema schema,
+      String reg)
+      throws StorageGroupNotSetException, IllegalPathException {
+    List<String> measurements = schema.getValueMeasurementIdList();
+    for (int i = 0; i < measurements.size(); i++) {
+      if (!Pattern.matches(reg.replace("*", ".*"), measurements.get(i))) {
+        continue;
       }
-    } else {
-      for (MNode child : node.getChildren().values()) {
-        if (!Pattern.matches(nodeReg.replace("*", ".*"), child.getName())) {
-          continue;
-        }
-        findPath(child, nodes, idx + 1, timeseriesSchemaList, hasLimit, needLast, queryContext);
-        if (hasLimit && count.get().intValue() == limit.get().intValue()) {
-          return;
-        }
+      PartialPath devicePath = node.getPartialPath();
+      String[] tsRow = new String[7];
+      tsRow[0] = null;
+      tsRow[1] = getStorageGroupPath(devicePath).getFullPath();
+      tsRow[2] = schema.getValueTSDataTypeList().get(i).toString();
+      tsRow[3] = schema.getValueTSEncodingList().get(i).toString();
+      tsRow[4] = schema.getCompressor().toString();
+      tsRow[5] = "-1";
+      tsRow[6] =
+          needLast ? String.valueOf(getLastTimeStamp((MeasurementMNode) node, queryContext)) : null;
+      Pair<PartialPath, String[]> temp =
+          new Pair<>(new PartialPath(devicePath.getFullPath(), measurements.get(i)), tsRow);
+      timeseriesSchemaList.add(temp);
+    }
+  }
+
+  private void addVectorMeasurementSchemaForTemplate(
+      MNode node,
+      List<Pair<PartialPath, String[]>> timeseriesSchemaList,
+      boolean needLast,
+      QueryContext queryContext,
+      IMeasurementSchema schema,
+      String reg,
+      String vectorId)
+      throws StorageGroupNotSetException, IllegalPathException {
+    List<String> measurements = schema.getValueMeasurementIdList();
+    for (int i = 0; i < measurements.size(); i++) {
+      if (!Pattern.matches(reg.replace("*", ".*"), measurements.get(i))) {
+        continue;
       }
+      PartialPath devicePath =
+          new PartialPath(node.getPartialPath().getDevicePath().getFullPath(), vectorId);
+      String[] tsRow = new String[7];
+      tsRow[0] = null;
+      tsRow[1] = getStorageGroupPath(devicePath).getFullPath();
+      tsRow[2] = schema.getValueTSDataTypeList().get(i).toString();
+      tsRow[3] = schema.getValueTSEncodingList().get(i).toString();
+      tsRow[4] = schema.getCompressor().toString();
+      tsRow[5] = "-1";
+      tsRow[6] =
+          needLast ? String.valueOf(getLastTimeStamp((MeasurementMNode) node, queryContext)) : null;
+      Pair<PartialPath, String[]> temp =
+          new Pair<>(new PartialPath(devicePath.getFullPath(), measurements.get(i)), tsRow);
+      timeseriesSchemaList.add(temp);
     }
   }
 
@@ -1099,6 +1417,7 @@ public class MTree implements Serializable {
    * <p>e.g., MTree has [root.sg1.d1.s1, root.sg1.d1.s2, root.sg1.d2.s1] given path = root.sg1,
    * return [root.sg1.d1, root.sg1.d2]
    *
+   * @param path The given path
    * @return All child nodes' seriesPath(s) of given seriesPath.
    */
   Set<String> getChildNodePathInNextLevel(PartialPath path) throws MetadataException {
@@ -1114,11 +1433,11 @@ public class MTree implements Serializable {
   /**
    * Traverse the MTree to match all child node path in next level
    *
-   * @param node   the current traversing node
-   * @param nodes  split the prefix path with '.'
-   * @param idx    the current index of array nodes
+   * @param node the current traversing node
+   * @param nodes split the prefix path with '.'
+   * @param idx the current index of array nodes
    * @param parent store the node string having traversed
-   * @param res    store all matched device names
+   * @param res store all matched device names
    * @param length expected length of path
    */
   @SuppressWarnings("squid:S3776") // Suppress high Cognitive Complexity warning
@@ -1132,8 +1451,13 @@ public class MTree implements Serializable {
       if (idx == length) {
         res.add(parent + node.getName());
       } else {
-        findChildNodePathInNextLevel(node.getChild(nodeReg), nodes, idx + 1,
-            parent + node.getName() + PATH_SEPARATOR, res, length);
+        findChildNodePathInNextLevel(
+            node.getChild(nodeReg),
+            nodes,
+            idx + 1,
+            parent + node.getName() + PATH_SEPARATOR,
+            res,
+            length);
       }
     } else {
       if (node.getChildren().size() > 0) {
@@ -1156,6 +1480,77 @@ public class MTree implements Serializable {
   }
 
   /**
+   * Get child node in the next level of the given path.
+   *
+   * <p>e.g., MTree has [root.sg1.d1.s1, root.sg1.d1.s2, root.sg1.d2.s1] given path = root.sg1,
+   * return [d1, d2]
+   *
+   * <p>e.g., MTree has [root.sg1.d1.s1, root.sg1.d1.s2, root.sg1.d2.s1] given path = root.sg1.d1
+   * return [s1, s2]
+   *
+   * @param path Path
+   * @return All child nodes' seriesPath(s) of given seriesPath.
+   */
+  Set<String> getChildNodeInNextLevel(PartialPath path) throws MetadataException {
+    String[] nodes = path.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(path.getFullPath());
+    }
+    Set<String> childNodes = new TreeSet<>();
+    findChildNodeInNextLevel(root, nodes, 1, "", childNodes, nodes.length + 1);
+    return childNodes;
+  }
+
+  /**
+   * Traverse the MTree to match all child node path in next level
+   *
+   * @param node the current traversing node
+   * @param nodes split the prefix path with '.'
+   * @param idx the current index of array nodes
+   * @param parent store the node string having traversed
+   * @param res store all matched device names
+   * @param length expected length of path
+   */
+  @SuppressWarnings("squid:S3776") // Suppress high Cognitive Complexity warning
+  private void findChildNodeInNextLevel(
+      MNode node, String[] nodes, int idx, String parent, Set<String> res, int length) {
+    if (node == null) {
+      return;
+    }
+    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
+    if (!nodeReg.contains(PATH_WILDCARD)) {
+      if (idx == length) {
+        res.add(node.getName());
+      } else {
+        findChildNodeInNextLevel(
+            node.getChild(nodeReg),
+            nodes,
+            idx + 1,
+            parent + node.getName() + PATH_SEPARATOR,
+            res,
+            length);
+      }
+    } else {
+      if (node.getChildren().size() > 0) {
+        for (MNode child : node.getChildren().values()) {
+          if (!Pattern.matches(nodeReg.replace("*", ".*"), child.getName())) {
+            continue;
+          }
+          if (idx == length) {
+            res.add(node.getName());
+          } else {
+            findChildNodeInNextLevel(
+                child, nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR, res, length);
+          }
+        }
+      } else if (idx == length) {
+        String nodeName = node.getName();
+        res.add(nodeName);
+      }
+    }
+  }
+
+  /**
    * Get all devices under give path
    *
    * @return a list contains all distinct devices names
@@ -1166,58 +1561,111 @@ public class MTree implements Serializable {
       throw new IllegalPathException(prefixPath.getFullPath());
     }
     Set<PartialPath> devices = new TreeSet<>();
-    findDevices(root, nodes, 1, devices);
+    findDevices(root, nodes, 1, devices, false, null);
     return devices;
+  }
+
+  List<ShowDevicesResult> getDevices(ShowDevicesPlan plan) throws MetadataException {
+    String[] nodes = plan.getPath().getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(plan.getPath().getFullPath());
+    }
+    Set<PartialPath> devices = new TreeSet<>();
+    limit.set(plan.getLimit());
+    offset.set(plan.getOffset());
+    curOffset.set(-1);
+    count.set(0);
+    findDevices(root, nodes, 1, devices, offset.get() != 0 || limit.get() != 0, null);
+    // avoid memory leaks
+    limit.remove();
+    offset.remove();
+    curOffset.remove();
+    count.remove();
+    List<ShowDevicesResult> res = new ArrayList<>();
+    for (PartialPath device : devices) {
+      if (plan.hasSgCol()) {
+        res.add(
+            new ShowDevicesResult(device.getFullPath(), getStorageGroupPath(device).getFullPath()));
+      } else {
+        res.add(new ShowDevicesResult(device.getFullPath()));
+      }
+    }
+    return res;
   }
 
   /**
    * Traverse the MTree to match all devices with prefix path.
    *
-   * @param node  the current traversing node
+   * @param node the current traversing node
    * @param nodes split the prefix path with '.'
-   * @param idx   the current index of array nodes
-   * @param res   store all matched device names
+   * @param idx the current index of array nodes
+   * @param res store all matched device names
    */
   @SuppressWarnings("squid:S3776")
-  private void findDevices(MNode node, String[] nodes, int idx, Set<PartialPath> res) {
+  private void findDevices(
+      MNode node,
+      String[] nodes,
+      int idx,
+      Set<PartialPath> res,
+      boolean hasLimit,
+      Template upperTemplate) {
+    upperTemplate = node.getDeviceTemplate() == null ? upperTemplate : node.getDeviceTemplate();
     String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
     // the node path doesn't contains '*'
     if (!nodeReg.contains(PATH_WILDCARD)) {
       MNode next = node.getChild(nodeReg);
       if (next != null) {
         if (next instanceof MeasurementMNode && idx >= nodes.length) {
+          if (hasLimit) {
+            curOffset.set(curOffset.get() + 1);
+            if (curOffset.get() < offset.get()
+                || count.get().intValue() == limit.get().intValue()) {
+              return;
+            }
+            count.set(count.get() + 1);
+          }
           res.add(node.getPartialPath());
         } else {
-          findDevices(next, nodes, idx + 1, res);
+          findDevices(next, nodes, idx + 1, res, hasLimit, upperTemplate);
         }
       }
     } else { // the node path contains '*'
       boolean deviceAdded = false;
-      for (MNode child : node.getChildren().values()) {
+      List<MNode> children = new ArrayList<>(node.getChildren().values());
+      // template part
+      if (upperTemplate != null && node.isUseTemplate()) {
+        children.addAll(upperTemplate.getMeasurementMNode());
+      }
+
+      for (MNode child : children) {
         // use '.*' to replace '*' to form a regex to match
         // if the match failed, skip it.
         if (!Pattern.matches(nodeReg.replace("*", ".*"), child.getName())) {
           continue;
         }
         if (child instanceof MeasurementMNode && !deviceAdded && idx >= nodes.length) {
+          if (hasLimit) {
+            curOffset.set(curOffset.get() + 1);
+            if (curOffset.get() < offset.get()
+                || count.get().intValue() == limit.get().intValue()) {
+              return;
+            }
+            count.set(count.get() + 1);
+          }
           res.add(node.getPartialPath());
           deviceAdded = true;
         }
-        findDevices(child, nodes, idx + 1, res);
+        findDevices(child, nodes, idx + 1, res, hasLimit, upperTemplate);
       }
     }
   }
 
-  /**
-   * Get all paths from root to the given level.
-   */
+  /** Get all paths from root to the given level. */
   List<PartialPath> getNodesList(PartialPath path, int nodeLevel) throws MetadataException {
     return getNodesList(path, nodeLevel, null);
   }
 
-  /**
-   * Get all paths from root to the given level
-   */
+  /** Get all paths from root to the given level */
   List<PartialPath> getNodesList(PartialPath path, int nodeLevel, StorageGroupFilter filter)
       throws MetadataException {
     String[] nodes = path.getNodes();
@@ -1229,8 +1677,9 @@ public class MTree implements Serializable {
     for (int i = 1; i < nodes.length; i++) {
       if (node.getChild(nodes[i]) != null) {
         node = node.getChild(nodes[i]);
-        if (node instanceof StorageGroupMNode && filter != null && !filter
-            .satisfy(node.getFullPath())) {
+        if (node instanceof StorageGroupMNode
+            && filter != null
+            && !filter.satisfy(node.getFullPath())) {
           return res;
         }
       } else {
@@ -1246,10 +1695,16 @@ public class MTree implements Serializable {
    *
    * @param targetLevel Record the distance to the target level, 0 means the target level.
    */
-  private void findNodes(MNode node, PartialPath path, List<PartialPath> res, int targetLevel,
+  private void findNodes(
+      MNode node,
+      PartialPath path,
+      List<PartialPath> res,
+      int targetLevel,
       StorageGroupFilter filter) {
-    if (node == null || node instanceof StorageGroupMNode && filter != null && !filter
-        .satisfy(node.getFullPath())) {
+    if (node == null
+        || node instanceof StorageGroupMNode
+            && filter != null
+            && !filter.satisfy(node.getFullPath())) {
       return;
     }
     if (targetLevel == 0) {
@@ -1262,10 +1717,71 @@ public class MTree implements Serializable {
   }
 
   public void serializeTo(String snapshotPath) throws IOException {
-    try (BufferedWriter bw = new BufferedWriter(
-        new FileWriter(SystemFileFactory.INSTANCE.getFile(snapshotPath)))) {
-      root.serializeTo(bw);
+    try (MLogWriter mLogWriter = new MLogWriter(snapshotPath)) {
+      root.serializeTo(mLogWriter);
     }
+  }
+
+  public static MTree deserializeFrom(File mtreeSnapshot) {
+    try (MLogReader mLogReader = new MLogReader(mtreeSnapshot)) {
+      return deserializeFromReader(mLogReader);
+    } catch (IOException e) {
+      logger.warn("Failed to deserialize from {}. Use a new MTree.", mtreeSnapshot.getPath());
+      return new MTree();
+    } finally {
+      limit = new ThreadLocal<>();
+      offset = new ThreadLocal<>();
+      count = new ThreadLocal<>();
+      curOffset = new ThreadLocal<>();
+    }
+  }
+
+  @SuppressWarnings("squid:S3776") // Suppress high Cognitive Complexity warning
+  private static MTree deserializeFromReader(MLogReader mLogReader) {
+    Deque<MNode> nodeStack = new ArrayDeque<>();
+    MNode node = null;
+    while (mLogReader.hasNext()) {
+      PhysicalPlan plan = null;
+      try {
+        plan = mLogReader.next();
+        if (plan == null) {
+          continue;
+        }
+        int childrenSize = 0;
+        if (plan instanceof StorageGroupMNodePlan) {
+          node = StorageGroupMNode.deserializeFrom((StorageGroupMNodePlan) plan);
+          childrenSize = ((StorageGroupMNodePlan) plan).getChildSize();
+        } else if (plan instanceof MeasurementMNodePlan) {
+          node = MeasurementMNode.deserializeFrom((MeasurementMNodePlan) plan);
+          childrenSize = ((MeasurementMNodePlan) plan).getChildSize();
+        } else if (plan instanceof MNodePlan) {
+          node = new MNode(null, ((MNodePlan) plan).getName());
+          childrenSize = ((MNodePlan) plan).getChildSize();
+        }
+
+        if (childrenSize != 0) {
+          ConcurrentHashMap<String, MNode> childrenMap = new ConcurrentHashMap<>();
+          for (int i = 0; i < childrenSize; i++) {
+            MNode child = nodeStack.removeFirst();
+            child.setParent(node);
+            childrenMap.put(child.getName(), child);
+            if (child instanceof MeasurementMNode) {
+              String alias = ((MeasurementMNode) child).getAlias();
+              if (alias != null) {
+                node.addAlias(alias, child);
+              }
+            }
+          }
+          node.setChildren(childrenMap);
+        }
+        nodeStack.push(node);
+      } catch (Exception e) {
+        logger.error(
+            "Can not operate cmd {} for err:", plan == null ? "" : plan.getOperatorType(), e);
+      }
+    }
+
+    return new MTree(node);
   }
 
   @Override

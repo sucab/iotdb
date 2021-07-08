@@ -29,10 +29,9 @@ public class IoTDBResultMetadata implements ResultSetMetaData {
   private List<String> columnTypeList;
   private boolean ignoreTimestamp;
 
-  /**
-   * Constructor of IoTDBResultMetadata.
-   */
-  public IoTDBResultMetadata(List<String> columnInfoList, List<String> columnTypeList, boolean ignoreTimestamp) {
+  /** Constructor of IoTDBResultMetadata. */
+  public IoTDBResultMetadata(
+      List<String> columnInfoList, List<String> columnTypeList, boolean ignoreTimestamp) {
     this.columnInfoList = columnInfoList;
     this.columnTypeList = columnTypeList;
     this.ignoreTimestamp = ignoreTimestamp;
@@ -116,12 +115,8 @@ public class IoTDBResultMetadata implements ResultSetMetaData {
       return Types.TIMESTAMP;
     }
     // BOOLEAN, INT32, INT64, FLOAT, DOUBLE, TEXT,
-    String columnType;
-    if(!ignoreTimestamp) {
-      columnType = columnTypeList.get(column - 2);
-    } else {
-      columnType = columnTypeList.get(column - 1);
-    }
+    String columnType = columnTypeList.get(column - 1);
+
     switch (columnType.toUpperCase()) {
       case "BOOLEAN":
         return Types.BOOLEAN;
@@ -155,12 +150,12 @@ public class IoTDBResultMetadata implements ResultSetMetaData {
       columnType = columnTypeList.get(column - 1);
     }
     String typeString = columnType.toUpperCase();
-    if (typeString.equals("BOOLEAN") ||
-        typeString.equals("INT32") ||
-        typeString.equals("INT64") ||
-        typeString.equals("FLOAT") ||
-        typeString.equals("DOUBLE") ||
-        typeString.equals("TEXT")) {
+    if (typeString.equals("BOOLEAN")
+        || typeString.equals("INT32")
+        || typeString.equals("INT64")
+        || typeString.equals("FLOAT")
+        || typeString.equals("DOUBLE")
+        || typeString.equals("TEXT")) {
       return typeString;
     }
     return null;
@@ -230,5 +225,4 @@ public class IoTDBResultMetadata implements ResultSetMetaData {
   public boolean isWritable(int arg0) throws SQLException {
     throw new SQLException(Constant.METHOD_NOT_SUPPORTED);
   }
-
 }

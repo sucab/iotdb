@@ -18,20 +18,24 @@
  */
 package org.apache.iotdb.db.metadata.mnode;
 
-import java.io.BufferedWriter;
+import org.apache.iotdb.db.conf.IoTDBConstant;
+import org.apache.iotdb.db.exception.metadata.AlignedTimeseriesException;
+import org.apache.iotdb.db.exception.metadata.MetadataException;
+import org.apache.iotdb.db.metadata.MetaUtils;
+import org.apache.iotdb.db.metadata.PartialPath;
+import org.apache.iotdb.db.metadata.logfile.MLogWriter;
+import org.apache.iotdb.db.metadata.template.Template;
+import org.apache.iotdb.db.rescon.CachedStringPool;
+
 import java.io.IOException;
 import java.io.Serializable;
-import java.util.Collections;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import org.apache.iotdb.db.conf.IoTDBConstant;
-import org.apache.iotdb.db.metadata.MetadataConstant;
-import org.apache.iotdb.db.metadata.PartialPath;
-import org.apache.iotdb.db.rescon.CachedStringPool;
 
 /**
  * This class is the implementation of Metadata Node. One MNode instance represents one node in the
@@ -40,51 +44,54 @@ import org.apache.iotdb.db.rescon.CachedStringPool;
 public class MNode implements Serializable {
 
   private static final long serialVersionUID = -770028375899514063L;
-  private static Map<String, String> cachedPathPool = CachedStringPool.getInstance()
-      .getCachedPool();
+  private static Map<String, String> cachedPathPool =
+      CachedStringPool.getInstance().getCachedPool();
 
-  /**
-   * Name of the MNode
-   */
+  /** Name of the MNode */
   protected String name;
+
   protected MNode parent;
 
-  /**
-   * from root to this node, only be set when used once for InternalMNode
-   */
+  /** from root to this node, only be set when used once for InternalMNode */
   protected String fullPath;
 
   /**
-   * use in Measurement Node so it's protected
-   * suppress warnings reason: volatile for double synchronized check
+   * use in Measurement Node so it's protected suppress warnings reason: volatile for double
+   * synchronized check
+   *
+   * <p>This will be a ConcurrentHashMap instance
    */
   @SuppressWarnings("squid:S3077")
-  protected transient volatile ConcurrentMap<String, MNode> children = null;
+  protected transient volatile Map<String, MNode> children = null;
 
   /**
    * suppress warnings reason: volatile for double synchronized check
+   *
+   * <p>This will be a ConcurrentHashMap instance
    */
   @SuppressWarnings("squid:S3077")
-  private transient volatile ConcurrentMap<String, MNode> aliasChildren = null;
+  private transient volatile Map<String, MNode> aliasChildren = null;
 
-  /**
-   * Constructor of MNode.
-   */
+  // device template
+  protected Template deviceTemplate = null;
+
+  private volatile boolean useTemplate = false;
+
+  /** Constructor of MNode. */
   public MNode(MNode parent, String name) {
     this.parent = parent;
     this.name = name;
   }
 
-  /**
-   * check whether the MNode has a child with the name
-   */
+  /** check whether the MNode has a child with the name */
   public boolean hasChild(String name) {
-    return (children != null && children.containsKey(name)) ||
-        (aliasChildren != null && aliasChildren.containsKey(name));
+    return (children != null && children.containsKey(name))
+        || (aliasChildren != null && aliasChildren.containsKey(name));
   }
 
   /**
    * add a child to current mnode
+   *
    * @param name child's name
    * @param child child's node
    */
@@ -101,31 +108,63 @@ public class MNode implements Serializable {
         }
       }
     }
-
+    child.parent = this;
     children.putIfAbsent(name, child);
   }
 
   /**
-   * delete a child
+   * Add a child to the current mnode.
+   *
+   * <p>This method will not take the child's name as one of the inputs and will also make this
+   * Mnode be child node's parent. All is to reduce the probability of mistaken by users and be more
+   * convenient for users to use. And the return of this method is used to conveniently construct a
+   * chain of time series for users.
+   *
+   * @param child child's node
+   * @return return the MNode already added
    */
+  MNode addChild(MNode child) {
+    /* use cpu time to exchange memory
+     * measurementNode's children should be null to save memory
+     * add child method will only be called when writing MTree, which is not a frequent operation
+     */
+    if (children == null) {
+      // double check, children is volatile
+      synchronized (this) {
+        if (children == null) {
+          children = new ConcurrentHashMap<>();
+        }
+      }
+    }
+
+    child.parent = this;
+    children.putIfAbsent(child.getName(), child);
+    return child;
+  }
+
+  /** delete a child */
   public void deleteChild(String name) {
     if (children != null) {
       children.remove(name);
     }
   }
 
-  /**
-   * delete the alias of a child
-   */
+  /** delete the alias of a child */
   public void deleteAliasChild(String alias) {
     if (aliasChildren != null) {
       aliasChildren.remove(alias);
     }
   }
 
-  /**
-   * get the child with the name
-   */
+  public Template getDeviceTemplate() {
+    return deviceTemplate;
+  }
+
+  public void setDeviceTemplate(Template deviceTemplate) {
+    this.deviceTemplate = deviceTemplate;
+  }
+
+  /** get the child with the name */
   public MNode getChild(String name) {
     MNode child = null;
     if (children != null) {
@@ -137,23 +176,40 @@ public class MNode implements Serializable {
     return aliasChildren == null ? null : aliasChildren.get(name);
   }
 
-  /**
-   * get the count of all leaves whose ancestor is current node
-   */
-  public int getLeafCount() {
-    if (children == null) {
-      return 0;
+  public MNode getChildOfAlignedTimeseries(String name) throws MetadataException {
+    MNode node = null;
+    // for aligned timeseries
+    List<String> measurementList = MetaUtils.getMeasurementsInPartialPath(new PartialPath(name));
+    for (String measurement : measurementList) {
+      MNode nodeOfMeasurement = getChild(measurement);
+      if (node == null) {
+        node = nodeOfMeasurement;
+      } else {
+        if (node != nodeOfMeasurement) {
+          throw new AlignedTimeseriesException(
+              "Cannot get node of children in different aligned timeseries", name);
+        }
+      }
     }
-    int leafCount = 0;
-    for (MNode child : children.values()) {
-      leafCount += child.getLeafCount();
-    }
-    return leafCount;
+    return node;
   }
 
-  /**
-   * add an alias
-   */
+  /** get the count of all MeasurementMNode whose ancestor is current node */
+  public int getMeasurementMNodeCount() {
+    if (children == null) {
+      return 1;
+    }
+    int measurementMNodeCount = 0;
+    if (this instanceof MeasurementMNode) {
+      measurementMNodeCount += 1; // current node itself may be MeasurementMNode
+    }
+    for (MNode child : children.values()) {
+      measurementMNodeCount += child.getMeasurementMNodeCount();
+    }
+    return measurementMNodeCount;
+  }
+
+  /** add an alias */
   public boolean addAlias(String alias, MNode child) {
     if (aliasChildren == null) {
       // double check, alias children volatile
@@ -167,9 +223,7 @@ public class MNode implements Serializable {
     return aliasChildren.computeIfAbsent(alias, aliasName -> child) == child;
   }
 
-  /**
-   * get full path
-   */
+  /** get full path */
   public String getFullPath() {
     if (fullPath == null) {
       fullPath = concatFullPath();
@@ -183,6 +237,11 @@ public class MNode implements Serializable {
     return fullPath;
   }
 
+  /**
+   * get partial path of this node
+   *
+   * @return partial path
+   */
   public PartialPath getPartialPath() {
     List<String> detachedPath = new ArrayList<>();
     MNode temp = this;
@@ -224,8 +283,19 @@ public class MNode implements Serializable {
     return children;
   }
 
-  public void setChildren(ConcurrentMap<String, MNode> children) {
+  public Map<String, MNode> getAliasChildren() {
+    if (aliasChildren == null) {
+      return Collections.emptyMap();
+    }
+    return aliasChildren;
+  }
+
+  public void setChildren(Map<String, MNode> children) {
     this.children = children;
+  }
+
+  private void setAliasChildren(Map<String, MNode> aliasChildren) {
+    this.aliasChildren = aliasChildren;
   }
 
   public String getName() {
@@ -236,21 +306,101 @@ public class MNode implements Serializable {
     this.name = name;
   }
 
-  public void serializeTo(BufferedWriter bw) throws IOException {
-    serializeChildren(bw);
+  public void serializeTo(MLogWriter logWriter) throws IOException {
+    serializeChildren(logWriter);
 
-    String s = String.valueOf(MetadataConstant.MNODE_TYPE) + "," + name + ","
-        + (children == null ? "0" : children.size());
-    bw.write(s);
-    bw.newLine();
+    logWriter.serializeMNode(this);
   }
 
-  void serializeChildren(BufferedWriter bw) throws IOException {
+  void serializeChildren(MLogWriter logWriter) throws IOException {
     if (children == null) {
       return;
     }
     for (Entry<String, MNode> entry : children.entrySet()) {
-      entry.getValue().serializeTo(bw);
+      entry.getValue().serializeTo(logWriter);
     }
+  }
+
+  /**
+   * replace a child of this mnode
+   *
+   * @param measurement measurement name
+   * @param newChildNode new child node
+   */
+  public void replaceChild(String measurement, MNode newChildNode) {
+    MNode oldChildNode = this.getChild(measurement);
+    if (oldChildNode == null) {
+      return;
+    }
+
+    // newChildNode builds parent-child relationship
+    Map<String, MNode> grandChildren = oldChildNode.getChildren();
+    newChildNode.setChildren(grandChildren);
+    grandChildren.forEach(
+        (grandChildName, grandChildNode) -> grandChildNode.setParent(newChildNode));
+
+    Map<String, MNode> grandAliasChildren = oldChildNode.getAliasChildren();
+    newChildNode.setAliasChildren(grandAliasChildren);
+    grandAliasChildren.forEach(
+        (grandAliasChildName, grandAliasChild) -> grandAliasChild.setParent(newChildNode));
+
+    newChildNode.setParent(this);
+
+    this.deleteChild(measurement);
+    this.addChild(newChildNode.getName(), newChildNode);
+  }
+
+  public void setFullPath(String fullPath) {
+    this.fullPath = fullPath;
+  }
+
+  /**
+   * get upper template of this node, remember we get nearest template alone this node to root
+   *
+   * @return upper template
+   */
+  public Template getUpperTemplate() {
+    MNode cur = this;
+    while (cur != null) {
+      if (cur.getDeviceTemplate() != null) {
+        return cur.deviceTemplate;
+      }
+      cur = cur.parent;
+    }
+
+    return null;
+  }
+
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    MNode mNode = (MNode) o;
+    if (fullPath == null) {
+      return Objects.equals(getFullPath(), mNode.getFullPath());
+    } else {
+      return Objects.equals(fullPath, mNode.fullPath);
+    }
+  }
+
+  @Override
+  public int hashCode() {
+    if (fullPath == null) {
+      return Objects.hash(getFullPath());
+    } else {
+      return Objects.hash(fullPath);
+    }
+  }
+
+  public boolean isUseTemplate() {
+    return useTemplate;
+  }
+
+  public void setUseTemplate(boolean useTemplate) {
+    this.useTemplate = useTemplate;
   }
 }

@@ -19,7 +19,7 @@
 
 -->
 
-# 1. work process
+# IoTDB Working Process
 
 ## Main link
 
@@ -47,17 +47,17 @@ Other mailing list:
 
 
 
-## New features, bug feedback, improvements, and more
+## New features, bug feedback, improvements and more
 
 All features or bugs that you want IoTDB to do can be raised on Jira：https://issues.apache.org/jira/projects/IOTDB/issues
 
-You can choose issue types: bug, improvement, new feature, etc.  New issues will be automatically synchronized to the mailing list (notifications@), and subsequent discussions can be left on jira or on the mailing list.  When the issue is resolved, close the issue.
+You can choose issue types: bug, improvement, new feature, etc.  New issues will be automatically synchronized to the mailing list (notifications@), and subsequent discussions can be left on jira or on the mailing list. When the issue is resolved, close the issue.
 
 ## Email discussion content (English)
 
-* Joining the mailing list for the first time can introduce you briefly.  (Hi, I'm xxx ...)
+* Joining the mailing list for the first time can introduce youself briefly.  (Hi, I'm xxx ...)
 
-* Before developing a function, you can send an e-mail to declare the task you want to do.（Hi，I'm working on issue IOTDB-XXX，My plan is ...）
+* Before developing a new feature, you can send an e-mail to declare the task you want to do.（Hi，I'm working on issue IOTDB-XXX，My plan is ...）
 
 ## Contributing documents
 
@@ -75,13 +75,38 @@ The content of all IoTDB official websites is in the docs of the project root di
 Correspondence between versions and branches on the official website:
 
 * In progress -> master
-* major_version.x -> rel/major_version （如 0.9.x -> rel/0.9）
+* major_version.x -> rel/major_version （eg 0.9.x -> rel/0.9）
 
 Precautions:
 
-* Images in Markdown can be uploaded to https://github.com/thulab/iotdb/issues/543 for url
+* Images in Markdown can be uploaded to https://github.com/apache/iotdb-bin-resources for url
 * Do not use special Unicode chars, e.g., U+FF1A 
 * Do not use the character of dollar (as we will use Latex to generate pdf files)
+
+## Code Formatting
+
+We use the [Spotless
+plugin](https://github.com/diffplug/spotless/tree/main/plugin-maven) together with [google-java-format](https://github.com/google/google-java-format) to format our Java code. You can configure your IDE to automatically apply formatting on saving with these steps(Take idea as an example):
+
+1. Download the [google-java-format
+   plugin v1.7.0.5](https://plugins.jetbrains.com/plugin/8527-google-java-format/versions/stable/83169), it can be installed in IDEA (Preferences -> plugins -> search google-java-format), [More detailed setup manual](https://github.com/google/google-java-format#intellij-android-studio-and-other-jetbrains-ides)
+2. Install the plugin from disk (Plugins -> little gear icon -> "Install plugin from disk" -> Navigate to downloaded zip file)
+3. In the plugin settings, enable the plugin and keep the default Google code style (2-space indents)
+4. Remember to never update this plugin to a later version，until Spotless was upgraded to version 1.8+.
+5. Install the [Save Actions
+   plugin](https://plugins.jetbrains.com/plugin/7642-save-actions) , and enable the plugin, along with "Optimize imports" and "Reformat file"
+6. In the "Save Actions" settings page, setup a "File Path Inclusion" for `.*\.java`. Otherwise you will get unintended reformatting in other files you edit.
+7. Fix the issues of reordering the import packages: in IDEA: choose: Preferences | Editor | Code Style | Java | imports. At the tail of the panel, there is "Import Layout", change it to:
+```shell
+   import org.apache.iotdb.*
+   <blank line>
+   import all other imports
+   <blank line>
+   import java.*
+   <blank line>
+   import static all other imports
+```
+
 
 ## Contributing code
 
@@ -92,36 +117,45 @@ You can go to jira to pick up the existing issue or create your own issue and ge
 * Add code style as the root java-google-style.xml in the idea
 * Modify the code and add test cases (unit test, integration test)
   * Integration test reference:server/src/test/java/org/apache/iotdb/db/integration/IoTDBTimeZoneIT
+* Use `mvn spotless:check` to check the code style and use `mvn spotless:apply` to correct the code style
 * Submit a PR, starting with [IOTDB-jira number]
 * Email to dev mailing list：(I've submitted a PR for issue IOTDB-xxx [link])
 * Make changes based on other people's reviews and continue to update until merged
 * close jira issue
 
-## 2. IoTDB debugging method
+# IoTDB Debug Guide
 
-Recommended Use Intellij idea. ```mvn clean package -DskipTests``` After putting ```antlr/target/generated-sources/antlr4``` and ```thrift/target/generated-sources/thrift``` marked as ```Source Root```。 
+Recommended use Intellij idea. 
+```
+mvn clean package -DskipTests
+``` 
 
-* Server main function：```server/src/main/java/org/apache/iotdb/db/service/IoTDB``, Can be started in debug mode
-* Cli：```cli/src/main/java/org/apache/iotdb/cli/```，Use Cli for linux and WinCli for windows, you can start directly with the parameter "-h 127.0.0.1 -p 6667 -u root -pw root"
-* Server rpc implementation (mainly used for cli and server communication, generally start interruption point here):```server/src/main/java/org/apache/iotdb/db/service/TSServiceImpl```
-  * all jdbc statements：executeStatement(TSExecuteStatementReq req)
-  * jdbc query：executeQueryStatement(TSExecuteStatementReq req)	
-  * native Write interface：insertRecord(TSInsertRecordReq req)
+Mark `antlr/target/generated-sources/antlr4` and `thrift/target/generated-sources/thrift` as `Source Root`.
 
-* Storage engine org.apache.iotdb.db.engine.StorageEngine
-* Query engine org.apache.iotdb.db.qp.QueryProcessor
+* Server main function：`server/src/main/java/org/apache/iotdb/db/service/IoTDB`, can be started in debug mode.
+* Cli：`cli/src/main/java/org/apache/iotdb/cli/`，Use Cli for linux and WinCli for windows, you can start directly with the parameter "`-h 127.0.0.1 -p 6667 -u root -pw root`"
+* Server rpc implementation (mainly used for cli and server communication, generally start interruption point here):`server/src/main/java/org/apache/iotdb/db/service/TSServiceImpl`
+* all jdbc statements：`executeStatement(TSExecuteStatementReq req)`
+* jdbc query：`executeQueryStatement(TSExecuteStatementReq req)`	
+* native Write interface：`insertRecord(TSInsertRecordReq req)`
+`insertTablet(TSInsertTabletReq req)`
+
+* Storage engine`org.apache.iotdb.db.engine.StorageEngine`
+* Query engine `org.apache.iotdb.db.qp.QueryProcessor`
 
 
-## Frequent Questions when Compiling the Source Code
+# Frequent Questions When Compiling the Source Code
 
-1. I could not download thrift-* tools, like `Could not get content
-org.apache.maven.wagon.TransferFailedException: Transfer failed for https://github.com/jt2594838/mvn-thrift-compiler/raw/master/thrift_0.12.0_0.13.0_linux.exe`
+I could not download thrift-* tools, like `Could not get content
+org.apache.maven.wagon.TransferFailedException: Transfer failed for https://github.com/apache/iotdb-bin-resources/blob/main/compile-tools/thrift-0.14-ubuntu`
 
-It is due to some network problems (especially in China), you can:
+ It is due to some network problems (especially in China), you can:
 
-* Download the file from the URL manually;
-  * https://github.com/jt2594838/mvn-thrift-compiler/blob/master/thrift_0.12.0_0.13.0_mac.exe
-  * https://github.com/jt2594838/mvn-thrift-compiler/raw/master/thrift_0.12.0_0.13.0_mac.exe
-* Put the file to thrift/target/tools/
-* Re-run maven command like `mvn compile`
+ * Download the file from the URL manually;
+      * https://github.com/apache/iotdb-bin-resources/blob/main/compile-tools/thrift-0.14-ubuntu
 
+      * https://github.com/apache/iotdb-bin-resources/blob/main/compile-tools/thrift-0.14-MacOS
+ 
+ * Put the file to thrift/target/tools/
+
+ * Re-run maven command like `mvn compile`

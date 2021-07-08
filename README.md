@@ -21,7 +21,8 @@
 [English](./README.md) | [中文](./README_ZH.md)
 
 # IoTDB
-[![Build Status](https://www.travis-ci.org/apache/iotdb.svg?branch=master)](https://www.travis-ci.org/apache/iotdb)
+[![Main Mac and Linux](https://github.com/apache/iotdb/actions/workflows/main-unix.yml/badge.svg)](https://github.com/apache/iotdb/actions/workflows/main-unix.yml)
+[![Main Win](https://github.com/apache/iotdb/actions/workflows/main-win.yml/badge.svg)](https://github.com/apache/iotdb/actions/workflows/main-win.yml)
 [![coveralls](https://coveralls.io/repos/github/apache/iotdb/badge.svg?branch=master)](https://coveralls.io/repos/github/apache/iotdb/badge.svg?branch=master)
 [![GitHub release](https://img.shields.io/github/release/apache/iotdb.svg)](https://github.com/apache/iotdb/releases)
 [![License](https://img.shields.io/badge/license-Apache%202-4EB1BA.svg)](https://www.apache.org/licenses/LICENSE-2.0.html)
@@ -29,9 +30,11 @@
 ![](https://img.shields.io/github/downloads/apache/iotdb/total.svg)
 ![](https://img.shields.io/badge/platform-win10%20%7C%20macox%20%7C%20linux-yellow.svg)
 ![](https://img.shields.io/badge/java--language-1.8-blue.svg)
+[![Language grade: Java](https://img.shields.io/lgtm/grade/java/g/apache/iotdb.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/apache/iotdb/context:java)
 [![IoTDB Website](https://img.shields.io/website-up-down-green-red/https/shields.io.svg?label=iotdb-website)](https://iotdb.apache.org/)
 [![Maven Version](https://maven-badges.herokuapp.com/maven-central/org.apache.iotdb/iotdb-parent/badge.svg)](http://search.maven.org/#search|gav|1|g:"org.apache.iotdb")
-[![Gitpod Ready-to-Code](https://img.shields.io/badge/Gitpod-Ready--to--Code-blue?logo=gitpod)](https://gitpod.io/#https://github.com/apache/iotdb) 
+[![Gitpod Ready-to-Code](https://img.shields.io/badge/Gitpod-Ready--to--Code-blue?logo=gitpod)](https://gitpod.io/#https://github.com/apache/iotdb)
+[![Slack Status](https://img.shields.io/badge/slack-join_chat-white.svg?logo=slack&style=social)](https://join.slack.com/t/apacheiotdb/shared_invite/zt-qvso1nj8-7715TpySZtZqmyG5qXQwpg)
 
 # Overview
 
@@ -84,8 +87,8 @@ This short guide will walk you through the basic process of using IoTDB. For a m
 
 To use IoTDB, you need to have:
 
-1. Java >= 1.8 (1.8, 11, and 13 are verified. Please make sure the environment path has been set accordingly).
-2. Maven >= 3.1 (If you want to compile and install IoTDB from source code).
+1. Java >= 1.8 (1.8, 11, and 15 are verified. Please make sure the environment path has been set accordingly).
+2. Maven >= 3.6 (If you want to compile and install IoTDB from source code).
 3. Set the max open files num as 65535 to avoid "too many open files" error.
 
 ## Installation
@@ -97,9 +100,37 @@ IoTDB provides three installation methods, you can refer to the following sugges
 * Using Docker：The path to the dockerfile is https://github.com/apache/iotdb/tree/master/docker/src/main
 
 
-Here in the Quick Start, we give a brief introduction of using source code to install IoTDB. For further information, please refer to Chapter 3 of the User Guide.
+Here in the Quick Start, we give a brief introduction of using source code to install IoTDB. For further information, please refer to [User Guide](https://iotdb.apache.org/UserGuide/Master/QuickStart/QuickStart.html).
 
 ## Build from source
+
+### Prepare Thrift compiler
+
+Skip this chapter if you are using Windows. 
+
+As we use Thrift for our RPC module (communication and
+protocol definition), we involve Thrift during the compilation, so Thrift compiler 0.13.0 (or
+higher) is required to generate Thrift Java code. Thrift officially provides binary compiler for
+Windows, but unfortunately, they do not provide that for Unix OSs. 
+
+If you have permission to install new softwares, use `apt install` or `yum install` or `brew install`
+to install the Thrift compiler (If you already have installed the thrift compiler, skip this step).
+Then, you may add the following parameter
+when running Maven: `-Dthrift.download-url=http://apache.org/licenses/LICENSE-2.0.txt -Dthrift.exec.absolute.path=<YOUR LOCAL THRIFT BINARY FILE>`.
+
+If not, then you have to compile the thrift compiler, and it requires you install a boost library first.
+Therefore, we compiled a Unix  compiler ourselves and put it onto GitHub, and with the help of a
+maven plugin, it will be  downloaded automatically during compilation. 
+This compiler works fine with gcc8 or later, Ubuntu  MacOS, and CentOS, but previous versions 
+and other OSs are not guaranteed.
+
+If you can not download the thrift compiler automatically because of network problem, you can download 
+it yourself, and then either:
+rename your thrift file to `{project_root}\thrift\target\tools\thrift_0.12.0_0.13.0_linux.exe`;
+or, add Maven commands:
+`-Dthrift.download-url=http://apache.org/licenses/LICENSE-2.0.txt -Dthrift.exec.absolute.path=<YOUR LOCAL THRIFT BINARY FILE>`.
+
+### Compile IoTDB
 
 You can download the source code from:
 
@@ -107,12 +138,17 @@ You can download the source code from:
 git clone https://github.com/apache/iotdb.git
 ```
 
-The default master branch is the dev branch, If you want to use a released version x.x.x:
+The default dev branch is the master branch, If you want to use a released version x.x.x:
 
 ```
 git checkout release/x.x.x
 ```
 
+From v0.11.3 on, the tag name format is change to: vx.x.x:
+
+```
+git checkout vx.x.x
+```
 
 Under the root path of iotdb:
 
@@ -120,10 +156,16 @@ Under the root path of iotdb:
 > mvn clean package -DskipTests
 ```
 
-Then the binary version (including both server and cli) can be found at **distribution/target/apache-iotdb-{project.version}-bin.zip**
+Using `-P compile-cpp` for compiling cpp client (For more details, read client-cpp's Readme file.)
 
-> NOTE: Directories "thrift/target/generated-sources/thrift" and "antlr/target/generated-sources/antlr4" need to be added to sources roots to avoid compilation errors in the IDE.
+Then the binary version (including both server and cli) can be found at **distribution/target/apache-iotdb-{project.version}-all-bin.zip**
 
+**NOTE: Directories "`thrift/target/generated-sources/thrift`", "`thrift-sync/target/generated-sources/thrift`",
+"`thrift-cluster/target/generated-sources/thrift`"
+and "`antlr/target/generated-sources/antlr4`" need to be added to sources roots to avoid compilation errors in the IDE.**
+
+**In IDEA, you just need to right click on the root project name and choose "`Maven->Reload Project`" after 
+you run `mvn package` successfully.**
 
 ### Configurations
 
@@ -133,7 +175,7 @@ configuration files are under "conf" folder
   * system config module (`iotdb-engine.properties`)
   * log config module (`logback.xml`).
 
-For more information, please see [Chapter3: Server](http://iotdb.apache.org/UserGuide/Master/Server/Config%20Manual.html).
+For more information, please see [Config Manual](https://iotdb.apache.org/UserGuide/Master/Appendix/Config-Manual.html).
 
 ## Start
 
@@ -328,7 +370,7 @@ After being built, the IoTDB cli is located at the folder "cli/target/iotdb-cli-
 
 # Usage of CSV Import and Export Tool
 
-see [Usage of CSV Import and Export Tool](https://iotdb.apache.org/UserGuide/System%20Tools/CSV%20Tool.html)
+see [Usage of CSV Import and Export Tool](https://iotdb.apache.org/UserGuide/Master/System-Tools/CSV-Tool.html)
 
 # Frequent Questions for Compiling
 see [Frequent Questions when Compiling the Source Code](https://iotdb.apache.org/Development/ContributeGuide.html#_Frequent-Questions-when-Compiling-the-Source-Code)
@@ -340,6 +382,10 @@ see [Frequent Questions when Compiling the Source Code](https://iotdb.apache.org
 
 ### Wechat Group
 
-* Add friend: tietouqiao, and then we'll invite you to the group.
+* Add friend: `tietouqiao` or `liutaohua001`, and then we'll invite you to the group.
+
+### Slack
+
+* https://join.slack.com/t/apacheiotdb/shared_invite/zt-qvso1nj8-7715TpySZtZqmyG5qXQwpg
 
 see [Join the community](https://github.com/apache/iotdb/issues/1995) for more!
